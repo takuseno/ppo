@@ -6,75 +6,91 @@ import tensorflow as tf
 
 
 class Agent(object):
-    def __init__(self, network, obs_dim, num_actions, gamma=0.9):
+    def __init__(self, network, obs_dim, num_actions, gamma=0.9, reuse=None):
         self.num_actions = num_actions
         self.gamma = gamma
-        self.last_obs = None
         self.t = 0
-        self.states = []
+        self.obss = []
         self.actions = []
         self.rewards = []
         self.values = []
+        self.next_values = []
 
         act, train, update_old = build_graph.build_train(
             network=network,
             obs_dim=obs_dim,
             num_actions=num_actions,
-            gamma=gamma
+            gamma=gamma,
+            reuse=reuse
         )
         self._act = act
         self._train = train
         self._update_old = update_old
 
     def act(self, obs):
-        return self._act([obs])[0]
+        return self._act([obs])[0][0]
 
-    def act_and_train(self, obs, reward, episode):
+    def act_and_train(self, last_obs, last_action, last_value, reward, obs):
         action, value = self._act([obs])
         action = action[0]
         value = value[0]
         action = np.clip(action, -1, 1)
         reward /= 10.0
 
-        if len(self.states) == 100:
-            self.train(value)
-            self.states = []
-            self.rewards = []
-            self.actions = []
-            self.values = []
-
-        if self.last_obs is not None:
-            self.states.append(self.last_obs)
-            self.actions.append(self.last_action)
-            self.rewards.append(reward)
-            self.values.append(self.last_value)
+        if last_obs is not None:
+            self.add_trajectory(
+                last_obs,
+                last_action,
+                reward,
+                last_value,
+                value
+            )
 
         self.t += 1
-        self.last_obs = obs
-        self.last_action = action
-        self.last_value = value
-        return action
+        return action, value
 
-    def train(self, bootstrapped_value):
+    def train(self, obs, actions, returns, deltas):
+        self._train(obs, actions, returns, deltas)
+        self._update_old()
+
+    def stop_episode(self, last_obs, last_action, last_value, reward):
+        self.add_trajectory(
+            last_obs,
+            last_action,
+            reward,
+            last_value,
+            0
+        )
+
+    def _reset_trajectories(self):
+        self.obss = []
+        self.rewards = []
+        self.actions = []
+        self.values = []
+        self.next_values = []
+
+    def _add_trajectory(self, obs, action, reward, value, next_value):
+        self.obss.append(obs)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.values.append(value)
+        self.next_values.append(next_value)
+
+    def get_training_data(self):
+        obss = list(self.obss)
+        actions = list(self.actions)
         returns = []
         deltas = []
-        v = bootstrapped_value
-        for i in reversed(range(len(self.states))):
+        for i in reversed(range(len(self.obs))):
             reward = rewards[i]
-            v = reward + self.gamma * v
-            returns.append(v)
-            deltas.append(v - self.values[i])
+            value = values[i]
+            next_value = next_values[i]
+            delta = reward + self.gamma * next_value - value
+            returns.append(delta + value)
+            deltas.append(delta)
         returns = np.array(returns, dtype=np.float32)
         deltas = np.array(deltas, dtype=np.float32)
         # standardize advantages
         deltas = (deltas - deltas.mean()) / deltas.std()
-        self._train(self.states, self.actions, returns, deltas)
-
-    def stop_episode_and_train(self, obs, reward, done=False):
-        self.replay_buffer.append(obs_t=self.last_obs,
-                action=self.last_action, reward=reward, obs_tp1=obs, done=done)
-        self.stop_episode()
-
-    def stop_episode(self):
-        self.last_obs = None
-        self.last_action = []
+        self._reset_trajectories()
+        return obss, actions, list(returns), list(deltas)

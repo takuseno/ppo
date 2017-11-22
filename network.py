@@ -5,8 +5,8 @@ import tensorflow.contrib.layers as layers
 def _make_network(hiddens, inpt, num_actions, scope='network', reuse=None):
     with tf.variable_scope(scope, reuse=reuse):
         out = inpt
-        for hidden in hiddens:
-            out = tf.layers.dense(out, hidden, name='d1',
+        for i, hidden in enumerate(hiddens):
+            out = tf.layers.dense(out, hidden, name='d{}'.format(i),
                 bias_initializer=tf.constant_initializer(0.1),
                 kernel_initializer=tf.random_normal_initializer(0.0, 0.3))
             out = tf.nn.tanh(out)
@@ -28,5 +28,5 @@ def _make_network(hiddens, inpt, num_actions, scope='network', reuse=None):
             kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='d3')
     return policy, value, dist
 
-def make_network():
-    return lambda *args, **kwargs: _make_critic_network(hiddens, *args, **kwargs)
+def make_network(hiddens):
+    return lambda *args, **kwargs: _make_network(hiddens, *args, **kwargs)

@@ -9,7 +9,6 @@ def build_train(network, obs_dim, num_actions, gamma=1.0, epsilon=0.2, scope='pp
         act_t_ph = tf.placeholder(tf.float32, [None, num_actions], name='action')
         return_t_ph = tf.placeholder(tf.float32, [None], name='return')
         advantage_t_ph = tf.placeholder(tf.float32, [None], name='advantage')
-        lr_ph = tf.placeholder(tf.float32, [None], name='learning_rate')
 
         policy, value, dist = network(obs_t_input, num_actions, scope='network', reuse=reuse)
         network_func_vars = util.scope_vars(util.absolute_scope_name('network'), trainable_only=True)
@@ -23,16 +22,19 @@ def build_train(network, obs_dim, num_actions, gamma=1.0, epsilon=0.2, scope='pp
         surrogate2 = tf.clip_by_value(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage_t_ph
         surrogate = -tf.reduce_mean(tf.minimum(surrogate1, surrogate2), name='surrogate')
 
-        value_loss = tf.reduce_mean(tf.square(value - returns))
+        with tf.variable_scope('loss'):
+            # value network loss
+            value_loss = tf.reduce_mean(tf.square(value - return_t_ph))
 
-        entropy = tf.reduce_mean(dist.entropy())
-        penalty = -0.01 * entropy
+            # entropy penalty for exploration
+            entropy = tf.reduce_mean(dist.entropy())
+            penalty = -0.01 * entropy
 
-        # total loss
-        loss = surrogate + value_loss + penalty
+            # total loss
+            loss = surrogate + value_loss + penalty
 
         # optimize operations
-        optimizer = tf.train.AdamOptimizer(lr_ph)
+        optimizer = tf.train.AdamOptimizer(1e-4)
         optimize_expr = optimizer.minimize(loss, var_list=network_func_vars)
 
         # update old network operations
@@ -49,7 +51,7 @@ def build_train(network, obs_dim, num_actions, gamma=1.0, epsilon=0.2, scope='pp
         # train theano-style function
         train = util.function(
             inputs=[
-                obs_t_input, act_t_ph, return_t_ph, advantage_t_ph, lr_ph
+                obs_t_input, act_t_ph, return_t_ph, advantage_t_ph
             ],
             outputs=[loss],
             updates=[optimize_expr]

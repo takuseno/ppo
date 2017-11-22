@@ -8,8 +8,9 @@ import tensorflow as tf
 
 from lightsaber.tensorflow.util import initialize
 from lightsaber.rl.replay_buffer import ReplayBuffer
-from network import make_actor_network, make_critic_network
+from network import make_network
 from agent import Agent
+from backup import Backup
 
 
 def main():
@@ -18,9 +19,8 @@ def main():
     parser.add_argument('--outdir', type=str, default=None)
     parser.add_argument('--logdir', type=str, default=None)
     parser.add_argument('--load', type=str, default=None)
-    parser.add_argument('--final-exploration-frames',
-                        type=int, default=10 ** 6)
     parser.add_argument('--final-steps', type=int, default=10 ** 7)
+    parser.add_argument('--actors', type=int, default=8)
     parser.add_argument('--render', action='store_true')
     args = parser.parse_args()
 
@@ -31,19 +31,19 @@ def main():
     if args.logdir is None:
         args.logdir = os.path.join(os.path.dirname(__file__), 'logs')
 
-    env = gym.make(args.env)
+    envs = []
+    for i in range(args.actors):
+        envs.append(gym.make(args.env))
 
-    obs_dim = env.observation_space.shape[0]
-    n_actions = env.action_space.shape[0]
+    obs_dim = envs[0].observation_space.shape[0]
+    n_actions = envs[0].action_space.shape[0]
 
-    actor = make_actor_network([30])
-    critic = make_critic_network()
-    replay_buffer = ReplayBuffer(10 ** 5)
+    network = make_network([64, 64])
 
     sess = tf.Session()
     sess.__enter__()
 
-    agent = Agent(actor, critic, obs_dim, n_actions, replay_buffer)
+    agent = Agent(network, obs_dim, n_actions)
 
     initialize()
 
@@ -58,40 +58,69 @@ def main():
 
     global_step = 0
     episode = 0
-
+    backup = Backup(args.actors)
+    training_data = []
     while True:
-        reward = 0
-        done = False
-        sum_of_rewards = 0
-        step = 0
-        state = env.reset()
-
-        while True:
-            if args.render:
-                env.render()
-
+        for i in range(args.actors):
+            env = envs[i]
+            # restore previous situation
+            sum_of_reward, reward, obs, last_obs,\
+                    last_action, last_value, done = backup.restore(i)
             if done:
-                summary, _ = sess.run([merged, reward_summary], feed_dict={reward_summary: sum_of_rewards})
-                train_writer.add_summary(summary, global_step)
-                agent.stop_episode_and_train(state, reward, done=done)
-                break
+                sum_of_reward = 0
+                reward = 0
+                obs = env.reset()
+                last_obs = None
+                last_action = None
+                last_value = None
+                done = False
+            for step in range(100):
+                if i == 0 and args.render:
+                    env.render()
 
-            action = agent.act_and_train(state, reward, episode)
+                if done:
+                    summary, _ = sess.run(
+                        [merged, reward_summary],
+                        feed_dict={reward_summary: sum_of_reward}
+                    )
+                    train_writer.add_summary(summary, global_step)
+                    agent.stop_episode(
+                            last_obs, last_action, last_value, reward)
+                    print('Episode: {}, Step: {}: Reward: {}'.format(
+                                        episode, global_step, sum_of_reward))
+                    episode += 1
+                    break
 
-            state, reward, done, info = env.step(action)
+                action, value = agent.act_and_train(
+                        last_obs, last_action, last_value, obs, reward)
 
-            sum_of_rewards += reward
-            step += 1
-            global_step += 1
+                last_obs = obs
+                last_action = action
+                last_value = value
+                obs, reward, done, info = env.step(action)
 
-            if global_step % 10 ** 6 == 0:
-                path = os.path.join(args.outdir, '{}/model.ckpt'.format(global_step))
-                saver.save(sess, path)
+                sum_of_rewards += reward
+                global_step += 1
 
-        episode += 1
+                if global_step % 10 ** 6 == 0:
+                    path = os.path.join(args.outdir, '{}/model.ckpt'.format(global_step))
+                    saver.save(sess, path)
+            # backup current situation
+            backup.save(i, sum_of_reward, reward,
+                    obs, last_obs, last_action, last_value, done)
+            training_data.append(agent.get_training_data())
 
-        print('Episode: {}, Step: {}: Reward: {}'.format(
-                episode, global_step, sum_of_rewards))
+        # train network
+        obs = []
+        actions = []
+        returns = []
+        deltas = []
+        for o, a, r, d in training_data:
+            obs.extend(o)
+            actions.extend(a)
+            returns.extend(r)
+            deltas.extend(d)
+        agent.train(obs, actions, returns, deltas)
 
         if args.final_steps < global_step:
             break
