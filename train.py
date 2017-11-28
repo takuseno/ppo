@@ -46,6 +46,7 @@ def main():
     agent = Agent(network, obs_dim, n_actions)
 
     initialize()
+    agent.sync_old()
 
     saver = tf.train.Saver()
     if args.load is not None:
@@ -59,8 +60,8 @@ def main():
     global_step = 0
     episode = 0
     backup = Backup(args.actors)
-    training_data = []
     while True:
+        training_data = []
         for i in range(args.actors):
             env = envs[i]
             # restore previous situation
@@ -78,6 +79,22 @@ def main():
                 if i == 0 and args.render:
                     env.render()
 
+                action, value = agent.act_and_train(
+                        last_obs, last_action, last_value, reward,  obs)
+
+                last_obs = obs
+                last_action = action
+                last_value = value
+                obs, reward, done, info = env.step(action)
+
+                sum_of_reward += reward
+                global_step += 1
+
+                if global_step % 10 ** 6 == 0:
+                    path = os.path.join(args.outdir,
+                            '{}/model.ckpt'.format(global_step))
+                    saver.save(sess, path)
+
                 if done:
                     summary, _ = sess.run(
                         [merged, reward_summary],
@@ -90,21 +107,6 @@ def main():
                                         episode, global_step, sum_of_reward))
                     episode += 1
                     break
-
-                action, value = agent.act_and_train(
-                        last_obs, last_action, last_value, obs, reward)
-
-                last_obs = obs
-                last_action = action
-                last_value = value
-                obs, reward, done, info = env.step(action)
-
-                sum_of_rewards += reward
-                global_step += 1
-
-                if global_step % 10 ** 6 == 0:
-                    path = os.path.join(args.outdir, '{}/model.ckpt'.format(global_step))
-                    saver.save(sess, path)
             # backup current situation
             backup.save(i, sum_of_reward, reward,
                     obs, last_obs, last_action, last_value, done)

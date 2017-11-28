@@ -16,7 +16,7 @@ class Agent(object):
         self.values = []
         self.next_values = []
 
-        act, train, update_old = build_graph.build_train(
+        act, train, update_old, backup_current = build_graph.build_train(
             network=network,
             obs_dim=obs_dim,
             num_actions=num_actions,
@@ -26,6 +26,7 @@ class Agent(object):
         self._act = act
         self._train = train
         self._update_old = update_old
+        self._backup_current = backup_current
 
     def act(self, obs):
         return self._act([obs])[0][0]
@@ -35,10 +36,9 @@ class Agent(object):
         action = action[0]
         value = value[0]
         action = np.clip(action, -1, 1)
-        reward /= 10.0
 
         if last_obs is not None:
-            self.add_trajectory(
+            self._add_trajectory(
                 last_obs,
                 last_action,
                 reward,
@@ -50,11 +50,12 @@ class Agent(object):
         return action, value
 
     def train(self, obs, actions, returns, deltas):
-        self._train(obs, actions, returns, deltas)
+        self._backup_current()
+        print(self._train(obs, actions, returns, deltas))
         self._update_old()
 
     def stop_episode(self, last_obs, last_action, last_value, reward):
-        self.add_trajectory(
+        self._add_trajectory(
             last_obs,
             last_action,
             reward,
@@ -81,10 +82,10 @@ class Agent(object):
         actions = list(self.actions)
         returns = []
         deltas = []
-        for i in reversed(range(len(self.obs))):
-            reward = rewards[i]
-            value = values[i]
-            next_value = next_values[i]
+        for i in reversed(range(len(self.obss))):
+            reward = self.rewards[i]
+            value = self.values[i]
+            next_value = self.next_values[i]
             delta = reward + self.gamma * next_value - value
             returns.append(delta + value)
             deltas.append(delta)
@@ -94,3 +95,6 @@ class Agent(object):
         deltas = (deltas - deltas.mean()) / deltas.std()
         self._reset_trajectories()
         return obss, actions, list(returns), list(deltas)
+
+    def sync_old(self):
+        self._update_old()
