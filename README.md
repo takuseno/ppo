@@ -1,4 +1,4 @@
-## DDPG
+## PPO
 Proximal Policy Optimization implementation with Tensorflow.
 
 ## requirements
