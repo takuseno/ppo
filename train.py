@@ -67,6 +67,7 @@ def main():
             # restore previous situation
             sum_of_reward, reward, obs, last_obs,\
                     last_action, last_value, done = backup.restore(i)
+            # initialize values for the new episode
             if done:
                 sum_of_reward = 0
                 reward = 0
@@ -90,11 +91,13 @@ def main():
                 sum_of_reward += reward
                 global_step += 1
 
+                # save model
                 if global_step % 10 ** 6 == 0:
                     path = os.path.join(args.outdir,
                             '{}/model.ckpt'.format(global_step))
                     saver.save(sess, path)
 
+                # the end of episode
                 if done:
                     summary, _ = sess.run(
                         [merged, reward_summary],
@@ -103,13 +106,20 @@ def main():
                     train_writer.add_summary(summary, global_step)
                     agent.stop_episode(
                             last_obs, last_action, last_value, reward)
-                    print('Episode: {}, Step: {}: Reward: {}'.format(
-                                        episode, global_step, sum_of_reward))
+                    print(
+                        'Episode: {}, Step: {}: Reward: {}'.format(
+                        episode,
+                        global_step,
+                        sum_of_reward
+                    ))
                     episode += 1
                     break
+
             # backup current situation
             backup.save(i, sum_of_reward, reward,
-                    obs, last_obs, last_action, last_value, done)
+                        obs, last_obs, last_action, last_value, done)
+
+            # append data for training
             training_data.append(agent.get_training_data())
 
         # train network

@@ -82,12 +82,14 @@ class Agent(object):
         actions = list(self.actions)
         returns = []
         deltas = []
+        V = 0
         for i in reversed(range(len(self.obss))):
             reward = self.rewards[i]
             value = self.values[i]
             next_value = self.next_values[i]
             delta = reward + self.gamma * next_value - value
-            returns.append(delta + value)
+            V = delta + 0.95 * self.gamma * V
+            returns.append(V)
             deltas.append(delta)
         returns = np.array(returns, dtype=np.float32)
         deltas = np.array(deltas, dtype=np.float32)

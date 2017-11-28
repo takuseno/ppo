@@ -102,7 +102,7 @@ def build_train(network, obs_dim,
             inputs=[
                 obs_t_input, act_t_ph, return_t_ph, advantage_t_ph
             ],
-            outputs=[loss, value_loss, tf.reduce_mean(advantage_t_ph)],
+            outputs=[loss, value_loss, surrogate],
             updates=[optimize_expr]
         )
 
