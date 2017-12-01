@@ -91,8 +91,8 @@ class Agent(object):
             V = delta + 0.95 * self.gamma * V
             returns.append(V)
             deltas.append(delta)
-        returns = np.array(returns, dtype=np.float32)
-        deltas = np.array(deltas, dtype=np.float32)
+        returns = np.array(list(reversed(returns)), dtype=np.float32)
+        deltas = np.array(list(reversed(deltas)), dtype=np.float32)
         # standardize advantages
         deltas = (deltas - deltas.mean()) / deltas.std()
         self._reset_trajectories()
