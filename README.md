@@ -1,6 +1,8 @@
 ## PPO
 Proximal Policy Optimization implementation with Tensorflow.
 
+https://arxiv.org/pdf/1707.06347.pdf
+
 ## requirements
 - Python3
 
