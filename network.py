@@ -12,20 +12,41 @@ def _make_network(hiddens, inpt, num_actions, scope='network', reuse=None):
             out = tf.nn.tanh(out)
 
         # policy branch
-        mu = tf.layers.dense(out, num_actions,
-                kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='mu')
+        mu = tf.layers.dense(
+            out,
+            num_actions,
+            kernel_initializer=tf.random_uniform_initializer(
+                minval=-3e-3,
+                maxval=3e-3
+            ),
+            name='mu'
+        )
         mu = tf.nn.tanh(mu + 1e-5)
 
-        sigma = tf.layers.dense(out, num_actions,
-                kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='sigma')
+        sigma = tf.layers.dense(
+            out,
+            num_actions,
+            kernel_initializer=tf.random_uniform_initializer(
+                minval=-3e-3,
+                maxval=3e-3
+            ),
+            name='sigma'
+        )
         sigma = tf.nn.softplus(sigma + 1e-5)
 
         dist = tf.distributions.Normal(mu, sigma)
         policy = tf.squeeze(dist.sample(num_actions), [0])
 
         # value branch
-        value = tf.layers.dense(out, 1,
-            kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='d3')
+        value = tf.layers.dense(
+            out,
+            1,
+            kernel_initializer=tf.random_uniform_initializer(
+                minval=-3e-3,
+                maxval=3e-3
+            ),
+            name='d3'
+        )
     return policy, value, dist
 
 def make_network(hiddens):
