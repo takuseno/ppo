@@ -14,11 +14,11 @@ def _make_network(hiddens, inpt, num_actions, scope='network', reuse=None):
         # policy branch
         mu = tf.layers.dense(out, num_actions,
                 kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='mu')
-        mu = tf.nn.tanh(mu)
+        mu = tf.nn.tanh(mu + 1e-5)
 
         sigma = tf.layers.dense(out, num_actions,
                 kernel_initializer=tf.random_uniform_initializer(minval=-3e-3, maxval=3e-3), name='sigma')
-        sigma = tf.nn.softplus(sigma)
+        sigma = tf.nn.softplus(sigma + 1e-5)
 
         dist = tf.distributions.Normal(mu, sigma)
         policy = tf.squeeze(dist.sample(num_actions), [0])

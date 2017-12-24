@@ -4,11 +4,12 @@ import lightsaber.tensorflow.util as util
 import numpy as np
 import tensorflow as tf
 
-
 class Agent(object):
-    def __init__(self, network, obs_dim, num_actions, gamma=0.9, reuse=None):
+    def __init__(self, network, obs_dim,
+            num_actions, gamma=0.9, lam=0.95, reuse=None):
         self.num_actions = num_actions
         self.gamma = gamma
+        self.lam = lam
         self.t = 0
         self.obss = []
         self.actions = []
@@ -51,8 +52,10 @@ class Agent(object):
 
     def train(self, obs, actions, returns, deltas):
         self._backup_current()
-        print(self._train(obs, actions, returns, deltas))
+        loss, value_loss, ratio = self._train(obs, actions, returns, deltas)
+        print(loss, value_loss, ratio)
         self._update_old()
+        return ratio
 
     def stop_episode(self, last_obs, last_action, last_value, reward):
         self._add_trajectory(
@@ -80,21 +83,21 @@ class Agent(object):
     def get_training_data(self):
         obss = list(self.obss)
         actions = list(self.actions)
-        returns = []
         deltas = []
+        returns = []
         V = 0
         for i in reversed(range(len(self.obss))):
             reward = self.rewards[i]
             value = self.values[i]
             next_value = self.next_values[i]
             delta = reward + self.gamma * next_value - value
-            V = delta + 0.95 * self.gamma * V
-            returns.append(V)
-            deltas.append(delta)
-        returns = np.array(list(reversed(returns)), dtype=np.float32)
+            V = delta + self.lam * self.gamma * V
+            deltas.append(V)
+            returns.append(V + value)
         deltas = np.array(list(reversed(deltas)), dtype=np.float32)
+        returns = np.array(list(reversed(returns)), dtype=np.float32)
         # standardize advantages
-        deltas = (deltas - deltas.mean()) / deltas.std()
+        deltas = (deltas - deltas.mean()) / (deltas.std() + 1e-5)
         self._reset_trajectories()
         return obss, actions, list(returns), list(deltas)
 

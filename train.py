@@ -3,6 +3,7 @@ import cv2
 import gym
 import copy
 import os
+import sys
 import random
 import numpy as np
 import tensorflow as tf
@@ -133,7 +134,7 @@ def main():
             sampled_actions = np.array(actions)[indices]
             sampled_returns = np.array(returns)[indices]
             sampled_deltas = np.array(deltas)[indices]
-            agent.train(
+            ratio = agent.train(
                 sampled_obs,
                 sampled_actions,
                 sampled_returns,

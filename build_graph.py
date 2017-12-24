@@ -3,7 +3,7 @@ import lightsaber.tensorflow.util as util
 
 
 def build_train(network, obs_dim,
-                num_actions, gamma=1.0, epsilon=0.2, scope='ppo', reuse=None):
+            num_actions, gamma=1.0, epsilon=0.2, beta=0.01, scope='ppo', reuse=None):
     with tf.variable_scope(scope, reuse=reuse):
         # input placeholders
         obs_t_input = tf.placeholder(tf.float32, [None, obs_dim], name='obs_t')
@@ -45,11 +45,12 @@ def build_train(network, obs_dim,
         )
 
         # clipped surrogate objective
-        ratio = tf.exp(dist.log_prob(act_t_ph) - old_dist.log_prob(act_t_ph))
-        surrogate1 = ratio * advantage_t_ph
-        surrogate2 = tf.clip_by_value(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage_t_ph
+        cur_policy = dist.log_prob(act_t_ph + 1e-5)
+        old_policy = old_dist.log_prob(act_t_ph + 1e-5)
+        ratio = tf.exp(cur_policy - old_policy)
+        clipped_ratio = tf.clip_by_value(ratio, 1.0 - epsilon, 1.0 + epsilon)
         surrogate = -tf.reduce_mean(
-            tf.minimum(surrogate1, surrogate2),
+            tf.minimum(ratio, clipped_ratio) * advantage_t_ph,
             name='surrogate'
         )
 
@@ -59,13 +60,13 @@ def build_train(network, obs_dim,
 
             # entropy penalty for exploration
             entropy = tf.reduce_mean(dist.entropy())
-            penalty = -0.01 * entropy
+            penalty = -beta * entropy
 
             # total loss
             loss = surrogate + value_loss + penalty
 
         # optimize operations
-        optimizer = tf.train.AdamOptimizer(1e-3)
+        optimizer = tf.train.AdamOptimizer(3 * 1e-4)
         optimize_expr = optimizer.minimize(loss, var_list=network_func_vars)
 
         # update old network operations
@@ -103,7 +104,7 @@ def build_train(network, obs_dim,
             inputs=[
                 obs_t_input, act_t_ph, return_t_ph, advantage_t_ph
             ],
-            outputs=[loss, value_loss, surrogate],
+            outputs=[loss, value_loss, tf.reduce_mean(ratio)],
             updates=[optimize_expr]
         )
 
