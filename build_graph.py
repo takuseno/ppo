@@ -47,10 +47,11 @@ def build_train(network, obs_dim,
         # clipped surrogate objective
         ratio = tf.exp(dist.log_prob(act_t_ph) - old_dist.log_prob(act_t_ph))
         surrogate1 = ratio * advantage_t_ph
-        surrogate2 = tf.clip_by_value(
-                ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage_t_ph
+        surrogate2 = tf.clip_by_value(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage_t_ph
         surrogate = -tf.reduce_mean(
-                tf.minimum(surrogate1, surrogate2), name='surrogate')
+            tf.minimum(surrogate1, surrogate2),
+            name='surrogate'
+        )
 
         with tf.variable_scope('loss'):
             # value network loss
@@ -64,7 +65,7 @@ def build_train(network, obs_dim,
             loss = surrogate + value_loss + penalty
 
         # optimize operations
-        optimizer = tf.train.AdamOptimizer(1e-4)
+        optimizer = tf.train.AdamOptimizer(1e-3)
         optimize_expr = optimizer.minimize(loss, var_list=network_func_vars)
 
         # update old network operations

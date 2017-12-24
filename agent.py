@@ -35,7 +35,7 @@ class Agent(object):
         action, value = self._act([obs])
         action = action[0]
         value = value[0]
-        action = np.clip(action, -1, 1)
+        action = np.clip(action, -2, 2)
 
         if last_obs is not None:
             self._add_trajectory(
