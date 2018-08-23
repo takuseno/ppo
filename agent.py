@@ -1,105 +1,168 @@
-import network
-import build_graph
-import lightsaber.tensorflow.util as util
+from rlsaber.util import compute_v_and_adv
+from rollout import Rollout
+from build_graph import build_train
 import numpy as np
 import tensorflow as tf
 
-class Agent(object):
-    def __init__(self, network, obs_dim,
-            num_actions, gamma=0.9, lam=0.95, reuse=None):
-        self.num_actions = num_actions
+
+class Agent:
+    def __init__(self,
+                 model,
+                 actions,
+                 optimizer,
+                 nenvs,
+                 gamma=0.99,
+                 lstm_unit=256,
+                 time_horizon=5,
+                 value_factor=0.5,
+                 entropy_factor=0.01,
+                 grad_clip=40.0,
+                 state_shape=[84, 84, 1],
+                 phi=lambda s: s,
+                 name='a2c'):
+        self.actions = actions
         self.gamma = gamma
-        self.lam = lam
-        self.t = 0
-        self.obss = []
-        self.actions = []
-        self.rewards = []
-        self.values = []
-        self.next_values = []
+        self.name = name
+        self.time_horizon = time_horizon
+        self.state_shape = state_shape
+        self.nenvs = nenvs
+        self.phi = phi 
 
-        act, train, update_old, backup_current = build_graph.build_train(
-            network=network,
-            obs_dim=obs_dim,
-            num_actions=num_actions,
-            gamma=gamma,
-            reuse=reuse
+        self._act, self._train = build_train(
+            model=model,
+            num_actions=len(actions),
+            optimizer=optimizer,
+            nenvs=nenvs,
+            lstm_unit=lstm_unit,
+            state_shape=state_shape,
+            grad_clip=grad_clip,
+            value_factor=value_factor,
+            entropy_factor=entropy_factor,
+            scope=name
         )
-        self._act = act
-        self._train = train
-        self._update_old = update_old
-        self._backup_current = backup_current
 
-    def act(self, obs):
-        return self._act([obs])[0][0]
+        self.initial_state = np.zeros((nenvs, lstm_unit), np.float32)
+        self.rnn_state0 = self.initial_state
+        self.rnn_state1 = self.initial_state
 
-    def act_and_train(self, last_obs, last_action, last_value, reward, obs):
-        action, value = self._act([obs])
-        action = action[0]
-        value = value[0]
-        action = np.clip(action, -2, 2)
+        self.rollouts = [Rollout() for _ in range(nenvs)]
+        self.t = 0
 
-        if last_obs is not None:
-            self._add_trajectory(
-                last_obs,
-                last_action,
-                reward,
-                last_value,
-                value
-            )
+    def act(self, obs_t, reward_t, done_t, training=True):
+        # change state shape to WHC
+        obs_t = list(map(self.phi, obs_t))
+        # take next action
+        prob, value, rnn_state = self._act(
+            obs_t, self.rnn_state0, self.rnn_state1)
+        action_t = list(map(
+            lambda p: np.random.choice(range(len(self.actions)), p=p), prob))
+        value_t = np.reshape(value, [-1])
+        log_probs_t = []
+        for i, action, in enumerate(action_t):
+            log_probs_t.append(np.log(prob + 1e-20)[i][action])
 
         self.t += 1
-        return action, value
+        self.rnn_state0_t = self.rnn_state0
+        self.rnn_state1_t = self.rnn_state1
+        self.obs_t = obs_t
+        self.action_t = action_t
+        self.value_t = value_t
+        self.log_probs_t = log_probs_t
+        self.done_t = done_t
+        self.rnn_state0, self.rnn_state1 = rnn_state
+        return list(map(lambda a: self.actions[a], action_t))
 
-    def train(self, obs, actions, returns, deltas):
-        self._backup_current()
-        loss, value_loss, ratio = self._train(obs, actions, returns, deltas)
-        print(loss, value_loss, ratio)
-        self._update_old()
-        return ratio
+    # this method is called after act
+    def receive_next(self, obs_tp1, reward_tp1, done_tp1, update=False):
+        obs_tp1 = list(map(self.phi, obs_tp1))
 
-    def stop_episode(self, last_obs, last_action, last_value, reward):
-        self._add_trajectory(
-            last_obs,
-            last_action,
-            reward,
-            last_value,
-            0
-        )
+        for i in range(self.nenvs):
+            self.rollouts[i].add(
+                state=self.obs_t[i],
+                reward=reward_tp1[i],
+                action=self.action_t[i],
+                value=self.value_t[i],
+                log_prob=self.log_probs_t[i],
+                terminal=1.0 if done_tp1[i] else 0.0,
+                feature=[self.rnn_state0_t[i], self.rnn_state1_t[i]]
+            )
 
-    def _reset_trajectories(self):
-        self.obss = []
-        self.rewards = []
-        self.actions = []
-        self.values = []
-        self.next_values = []
+        if update:
+            # compute bootstrap value
+            _, value, _ = self._act(obs_tp1, self.rnn_state0, self.rnn_state1)
+            value_tp1 = np.reshape(value, [-1])
+            for i, done in enumerate(done_tp1):
+                if done:
+                    value_tp1[i] = 0.0
+            self.train(value_tp1)
 
-    def _add_trajectory(self, obs, action, reward, value, next_value):
-        self.obss.append(obs)
-        self.actions.append(action)
-        self.rewards.append(reward)
-        self.values.append(value)
-        self.next_values.append(next_value)
+        # initialize lstm state
+        for i, done in enumerate(done_tp1):
+            if done:
+                self.rnn_state0[i] = self.initial_state[0]
+                self.rnn_state1[i] = self.initial_state[0]
 
-    def get_training_data(self):
-        obss = list(self.obss)
-        actions = list(self.actions)
-        deltas = []
-        returns = []
-        V = 0
-        for i in reversed(range(len(self.obss))):
-            reward = self.rewards[i]
-            value = self.values[i]
-            next_value = self.next_values[i]
-            delta = reward + self.gamma * next_value - value
-            V = delta + self.lam * self.gamma * V
-            deltas.append(V)
-            returns.append(V + value)
-        deltas = np.array(list(reversed(deltas)), dtype=np.float32)
-        returns = np.array(list(reversed(returns)), dtype=np.float32)
-        # standardize advantages
-        deltas = (deltas - deltas.mean()) / (deltas.std() + 1e-5)
-        self._reset_trajectories()
-        return obss, actions, list(returns), list(deltas)
+    def train(self, bootstrap_values):
+        # rollout trajectories
+        states,\
+        actions,\
+        rewards,\
+        values,\
+        log_probs,\
+        features0,\
+        features1,\
+        masks = self._rollout_trajectories()
 
-    def sync_old(self):
-        self._update_old()
+        # compute advantages
+        targets = []
+        advs = []
+        for i in range(self.nenvs):
+            v, adv = compute_v_and_adv(
+                rewards[i], values[i], bootstrap_values[i], self.gamma)
+            targets.append(v)
+            advs.append(adv)
+
+        # step size which is usually time horizon
+        step_size = len(self.rollouts[0].states)
+
+        # flatten inputs
+        states = np.reshape(states, [-1] + self.state_shape)
+        actions = np.reshape(actions, [-1])
+        targets = np.reshape(targets, [-1])
+        advs = np.reshape(advs, [-1])
+        log_probs = np.reshape(log_probs, [-1])
+        masks = np.reshape(masks, [-1]) == 1.0
+
+        # train network
+        loss = self._train(
+            states, actions, targets, advs, log_probs,
+            features0, features1, masks, step_size)
+
+        # clean trajectories
+        for rollout in self.rollouts:
+            rollout.flush()
+        return loss
+
+    def _rollout_trajectories(self):
+        states = []
+        actions = []
+        rewards = []
+        values = []
+        log_probs = []
+        features0 = []
+        features1 = []
+        masks = []
+        for rollout in self.rollouts:
+            states.append(rollout.states)
+            actions.append(rollout.actions)
+            rewards.append(rollout.rewards)
+            values.append(rollout.values)
+            log_probs.append(rollout.log_probs)
+            features0.append(rollout.features[0][0])
+            features1.append(rollout.features[0][1])
+            # create mask
+            terminals = rollout.terminals
+            terminals = [0.0] + terminals[:len(terminals) - 1]
+            mask = (np.array(terminals) - 1.0) * -1.0
+            masks.append(mask.tolist())
+        return states, actions, rewards, values, log_probs, features0, features1, masks

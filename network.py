@@ -1,53 +1,64 @@
+import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 
 
-def _make_network(hiddens, inpt, num_actions, scope='network', reuse=None):
+def _make_network(convs,
+                  fcs,
+                  lstm,
+                  padding,
+                  inpt,
+                  rnn_state_tuple,
+                  num_actions,
+                  lstm_unit,
+                  nenvs,
+                  step_size,
+                  scope,
+                  reuse=None):
     with tf.variable_scope(scope, reuse=reuse):
         out = inpt
-        for i, hidden in enumerate(hiddens):
-            out = tf.layers.dense(out, hidden, name='d{}'.format(i),
-                bias_initializer=tf.constant_initializer(0.1),
-                kernel_initializer=tf.random_normal_initializer(0.0, 0.3))
-            out = tf.nn.tanh(out)
+        with tf.variable_scope('convnet'):
+            for num_outputs, kernel_size, stride in convs:
+                out = layers.convolution2d(
+                    out,
+                    num_outputs=num_outputs,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    activation_fn=tf.nn.relu,
+                    weights_initializer=tf.orthogonal_initializer(np.sqrt(2.0))
+                )
+            out = layers.flatten(out)
 
-        # policy branch
-        mu = tf.layers.dense(
-            out,
-            num_actions,
-            kernel_initializer=tf.random_uniform_initializer(
-                minval=-3e-3,
-                maxval=3e-3
-            ),
-            name='mu'
-        )
-        mu = tf.nn.tanh(mu + 1e-5)
+        with tf.variable_scope('hiddens'):
+            for hidden in fcs:
+                out = layers.fully_connected(
+                    out, hidden, activation_fn=tf.nn.relu,
+                    weights_initializer=tf.orthogonal_initializer(np.sqrt(2.0)))
 
-        sigma = tf.layers.dense(
-            out,
-            num_actions,
-            kernel_initializer=tf.random_uniform_initializer(
-                minval=-3e-3,
-                maxval=3e-3
-            ),
-            name='sigma'
-        )
-        sigma = tf.nn.softplus(sigma + 1e-5)
+        with tf.variable_scope('rnn'):
+            lstm_cell = tf.contrib.rnn.BasicLSTMCell(lstm_unit, state_is_tuple=True)
+            # sequence to batch
+            rnn_in = tf.reshape(out, [nenvs, step_size, int(out.shape[1])])
+            sequence_length = tf.ones(nenvs, dtype=tf.int32) * step_size
+            lstm_outputs, lstm_state = tf.nn.dynamic_rnn(
+                lstm_cell, rnn_in, initial_state=rnn_state_tuple,
+                sequence_length=sequence_length, time_major=False)
+            # batch to sequence
+            rnn_out = tf.reshape(lstm_outputs, [-1, lstm_unit])
 
-        dist = tf.distributions.Normal(mu, sigma)
-        policy = tf.squeeze(dist.sample(num_actions), [0])
+        if lstm:
+            out = rnn_out
 
-        # value branch
-        value = tf.layers.dense(
-            out,
-            1,
-            kernel_initializer=tf.random_uniform_initializer(
-                minval=-3e-3,
-                maxval=3e-3
-            ),
-            name='d3'
-        )
-    return policy, value, dist
+        policy = layers.fully_connected(
+            out, num_actions, activation_fn=tf.nn.softmax,
+            weights_initializer=tf.orthogonal_initializer(0.1))
 
-def make_network(hiddens):
-    return lambda *args, **kwargs: _make_network(hiddens, *args, **kwargs)
+        value = layers.fully_connected(
+            out, 1, activation_fn=None,
+            weights_initializer=tf.orthogonal_initializer(1.0))
+
+    return policy, value, (lstm_state[0], lstm_state[1])
+
+def make_network(convs, fcs, lstm=True, padding='VALID'):
+    return lambda *args, **kwargs: _make_network(convs, fcs, lstm, padding, *args, **kwargs)
