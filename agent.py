@@ -1,9 +1,46 @@
-from rlsaber.util import compute_v_and_adv
 from rollout import Rollout
 from build_graph import build_train
 import numpy as np
 import tensorflow as tf
 
+
+def compute_returns(rewards, bootstrap_value, terminals, gamma):
+    # (N, T) -> (T, N)
+    rewards = np.transpose(rewards, [1, 0])
+    terminals = np.transpose(terminals, [1, 0])
+    returns = []
+    R = bootstrap_value
+    for i in reversed(range(rewards.shape[0])):
+        R = rewards[i] + (1.0 - terminals[i]) * gamma * R
+        returns.append(R)
+    returns = reversed(returns)
+    # (T, N) -> (N, T)
+    returns = np.transpose(list(returns), [1, 0])
+    return returns
+
+def compute_gae(rewards, values, bootstrap_values, terminals, gamma, lam):
+    # (N, T) -> (T, N)
+    rewards = np.transpose(rewards, [1, 0])
+    values = np.transpose(values, [1, 0])
+    values = np.vstack((values, [bootstrap_values]))
+    terminals = np.transpose(terminals, [1, 0])
+    # compute delta
+    deltas = []
+    for i in reversed(range(rewards.shape[0])):
+        V = rewards[i] + (1.0 - terminals[i]) * gamma * values[i + 1]
+        delta = V - values[i]
+        deltas.append(delta)
+    deltas = np.array(list(reversed(deltas)))
+    # compute gae
+    A = deltas[-1,:]
+    advantages = [A]
+    for i in reversed(range(deltas.shape[0] - 1)):
+        A = deltas[i] + (1.0 - terminals[i]) * gamma * lam * A
+        advantages.append(A)
+    advantages = reversed(advantages)
+    # (T, N) -> (N, T)
+    advantages = np.transpose(list(advantages), [1, 0])
+    return advantages
 
 class Agent:
     def __init__(self,
@@ -12,20 +49,28 @@ class Agent:
                  optimizer,
                  nenvs,
                  gamma=0.99,
+                 lam=0.99,
                  lstm_unit=256,
-                 time_horizon=5,
                  value_factor=0.5,
                  entropy_factor=0.01,
+                 epsilon=0.2,
+                 time_horizon=128,
+                 batch_size=32,
+                 epoch=3,
                  grad_clip=40.0,
                  state_shape=[84, 84, 1],
                  phi=lambda s: s,
                  name='a2c'):
         self.actions = actions
         self.gamma = gamma
+        self.lam = lam
+        self.lstm_unit = lstm_unit
         self.name = name
-        self.time_horizon = time_horizon
         self.state_shape = state_shape
         self.nenvs = nenvs
+        self.time_horizon = time_horizon
+        self.batch_size = batch_size
+        self.epoch = epoch
         self.phi = phi 
 
         self._act, self._train = build_train(
@@ -38,6 +83,7 @@ class Agent:
             grad_clip=grad_clip,
             value_factor=value_factor,
             entropy_factor=entropy_factor,
+            epsilon=epsilon,
             scope=name
         )
 
@@ -104,39 +150,40 @@ class Agent:
 
     def train(self, bootstrap_values):
         # rollout trajectories
-        states,\
-        actions,\
-        rewards,\
-        values,\
-        log_probs,\
-        features0,\
-        features1,\
-        masks = self._rollout_trajectories()
+        trajectories = self._rollout_trajectories()
+        states = trajectories['states']
+        actions = trajectories['actions']
+        rewards = trajectories['rewards']
+        values = trajectories['values']
+        log_probs = trajectories['log_probs']
+        features0 = trajectories['features0']
+        features1 = trajectories['features1']
+        terminals = trajectories['terminals']
+        masks = trajectories['masks']
 
+        # compute returns
+        returns = compute_returns(
+            rewards, bootstrap_values, terminals, self.gamma)
         # compute advantages
-        targets = []
-        advs = []
-        for i in range(self.nenvs):
-            v, adv = compute_v_and_adv(
-                rewards[i], values[i], bootstrap_values[i], self.gamma)
-            targets.append(v)
-            advs.append(adv)
-
-        # step size which is usually time horizon
-        step_size = len(self.rollouts[0].states)
-
-        # flatten inputs
-        states = np.reshape(states, [-1] + self.state_shape)
-        actions = np.reshape(actions, [-1])
-        targets = np.reshape(targets, [-1])
-        advs = np.reshape(advs, [-1])
-        log_probs = np.reshape(log_probs, [-1])
-        masks = np.reshape(masks, [-1]) == 1.0
+        advs = compute_gae(
+            rewards, values, bootstrap_values, terminals, self.gamma, self.lam)
 
         # train network
-        loss = self._train(
-            states, actions, targets, advs, log_probs,
-            features0, features1, masks, step_size)
+        for epoch in range(self.epoch):
+            for i in range(int(self.time_horizon / self.batch_size)):
+                index = i * self.batch_size
+                batch_states = self._pick_batch(states, i, shape=self.state_shape)
+                batch_actions = self._pick_batch(actions, i)
+                batch_returns = self._pick_batch(returns, i)
+                batch_advs = self._pick_batch(advs, i)
+                batch_log_probs = self._pick_batch(log_probs, i)
+                batch_features0 = features0[:, index, :]
+                batch_features1 = features1[:, index, :]
+                batch_masks = self._pick_batch(masks, i) == 1.0
+                loss = self._train(
+                    batch_states, batch_actions, batch_returns, batch_advs,
+                    batch_log_probs, batch_features0, batch_features1,
+                    batch_masks, self.batch_size)
 
         # clean trajectories
         for rollout in self.rollouts:
@@ -151,6 +198,7 @@ class Agent:
         log_probs = []
         features0 = []
         features1 = []
+        terminals = []
         masks = []
         for rollout in self.rollouts:
             states.append(rollout.states)
@@ -158,11 +206,32 @@ class Agent:
             rewards.append(rollout.rewards)
             values.append(rollout.values)
             log_probs.append(rollout.log_probs)
-            features0.append(rollout.features[0][0])
-            features1.append(rollout.features[0][1])
+            features0.append(np.array(rollout.features)[:,0,:])
+            features1.append(np.array(rollout.features)[:,1,:])
             # create mask
-            terminals = rollout.terminals
-            terminals = [0.0] + terminals[:len(terminals) - 1]
-            mask = (np.array(terminals) - 1.0) * -1.0
+            terminals.append(rollout.terminals)
+            dones = [0.0] + rollout.terminals[:len(rollout.terminals) - 1]
+            mask = (np.array(dones) - 1.0) * -1.0
             masks.append(mask.tolist())
-        return states, actions, rewards, values, log_probs, features0, features1, masks
+        trajectories = dict(
+            states=np.array(states),
+            actions=np.array(actions),
+            rewards=np.array(rewards),
+            values=np.array(values),
+            log_probs=np.array(log_probs),
+            features0=np.array(features0),
+            features1=np.array(features1),
+            terminals=np.array(terminals),
+            masks=np.array(masks)
+        )
+        return trajectories
+
+    def _pick_batch(self, data, batch_index, flat=True, shape=None):
+        start_index = batch_index * self.batch_size
+        batch_data = data[:, start_index:start_index + self.batch_size]
+        if flat:
+            if shape is not None:
+                return np.reshape(batch_data, [-1] + shape)
+            return np.reshape(batch_data, [-1])
+        else:
+            return batch_data
