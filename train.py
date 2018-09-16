@@ -78,13 +78,16 @@ def main():
         optimizer,
         nenvs=constants.ACTORS,
         gamma=constants.GAMMA,
+        lam=constants.LAM,
         lstm_unit=constants.LSTM_UNIT,
         value_factor=constants.VALUE_FACTOR,
         entropy_factor=constants.ENTROPY_FACTOR,
         time_horizon=constants.TIME_HORIZON,
         batch_size=constants.BATCH_SIZE,
         grad_clip=constants.GRAD_CLIP,
+        epsilon=constants.EPSILON,
         state_shape=state_shape,
+        epoch=constants.EPOCH,
         phi=phi
     )
 
