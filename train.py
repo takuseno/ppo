@@ -67,10 +67,15 @@ def main():
         constants.CONVS, constants.FCS,
         lstm=constants.LSTM, padding=constants.PADDING)
 
+    # learning rate with decay operation
     lr = tf.Variable(constants.LR)
     decayed_lr = tf.placeholder(tf.float32)
     decay_lr_op = lr.assign(decayed_lr)
-    optimizer = tf.train.RMSPropOptimizer(lr, decay=0.99, epsilon=1e-5)
+    optimizer = tf.train.AdamOptimizer(lr, epsilon=1e-5)
+    # epsilon with decay operation
+    epsilon = tf.Variable(constants.EPSILON)
+    decayed_epsilon = tf.placeholder(tf.float32)
+    decay_epsilon_op = epsilon.assign(decayed_epsilon)
 
     agent = Agent(
         model,
@@ -85,7 +90,7 @@ def main():
         time_horizon=constants.TIME_HORIZON,
         batch_size=constants.BATCH_SIZE,
         grad_clip=constants.GRAD_CLIP,
-        epsilon=constants.EPSILON,
+        epsilon=epsilon,
         state_shape=state_shape,
         epoch=constants.EPOCH,
         phi=phi
@@ -125,6 +130,8 @@ def main():
             if decay < 0.0:
                 decay = 0.0
             sess.run(decay_lr_op, feed_dict={decayed_lr: constants.LR * decay})
+            sess.run(decay_epsilon_op,
+                     feed_dict={decayed_epsilon: constants.EPSILON * decay})
         if global_step % 10 ** 6 == 0:
             path = os.path.join(outdir, 'model.ckpt')
             saver.save(sess, path, global_step=global_step)
