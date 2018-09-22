@@ -167,6 +167,9 @@ class Agent:
         # compute advantages
         advs = compute_gae(
             rewards, values, bootstrap_values, terminals, self.gamma, self.lam)
+        # normalize advantages
+        valid_advs = np.reshape(advs, [-1])[np.reshape(masks == 1.0, [-1])]
+        advs = (advs - np.mean(valid_advs)) / np.std(valid_advs)
 
         # train network
         for epoch in range(self.epoch):
