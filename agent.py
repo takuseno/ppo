@@ -1,46 +1,10 @@
-from rollout import Rollout
-from build_graph import build_train
 import numpy as np
 import tensorflow as tf
 
+from rollout import Rollout
+from build_graph import build_train
+from rlsaber.util import compute_returns, compute_gae
 
-def compute_returns(rewards, bootstrap_value, terminals, gamma):
-    # (N, T) -> (T, N)
-    rewards = np.transpose(rewards, [1, 0])
-    terminals = np.transpose(terminals, [1, 0])
-    returns = []
-    R = bootstrap_value
-    for i in reversed(range(rewards.shape[0])):
-        R = rewards[i] + (1.0 - terminals[i]) * gamma * R
-        returns.append(R)
-    returns = reversed(returns)
-    # (T, N) -> (N, T)
-    returns = np.transpose(list(returns), [1, 0])
-    return returns
-
-def compute_gae(rewards, values, bootstrap_values, terminals, gamma, lam):
-    # (N, T) -> (T, N)
-    rewards = np.transpose(rewards, [1, 0])
-    values = np.transpose(values, [1, 0])
-    values = np.vstack((values, [bootstrap_values]))
-    terminals = np.transpose(terminals, [1, 0])
-    # compute delta
-    deltas = []
-    for i in reversed(range(rewards.shape[0])):
-        V = rewards[i] + (1.0 - terminals[i]) * gamma * values[i + 1]
-        delta = V - values[i]
-        deltas.append(delta)
-    deltas = np.array(list(reversed(deltas)))
-    # compute gae
-    A = deltas[-1,:]
-    advantages = [A]
-    for i in reversed(range(deltas.shape[0] - 1)):
-        A = deltas[i] + (1.0 - terminals[i]) * gamma * lam * A
-        advantages.append(A)
-    advantages = reversed(advantages)
-    # (T, N) -> (N, T)
-    advantages = np.transpose(list(advantages), [1, 0])
-    return advantages
 
 class Agent:
     def __init__(self,
@@ -78,6 +42,7 @@ class Agent:
             num_actions=len(actions),
             optimizer=optimizer,
             nenvs=nenvs,
+            step_size=batch_size,
             lstm_unit=lstm_unit,
             state_shape=state_shape,
             grad_clip=grad_clip,
@@ -87,9 +52,8 @@ class Agent:
             scope=name
         )
 
-        self.initial_state = np.zeros((nenvs, lstm_unit), np.float32)
-        self.rnn_state0 = self.initial_state
-        self.rnn_state1 = self.initial_state
+        self.initial_state = np.zeros((nenvs, lstm_unit*2), np.float32)
+        self.rnn_state = self.initial_state
 
         self.rollouts = [Rollout() for _ in range(nenvs)]
         self.t = 0
@@ -98,8 +62,7 @@ class Agent:
         # change state shape to WHC
         obs_t = list(map(self.phi, obs_t))
         # take next action
-        prob, value, rnn_state = self._act(
-            obs_t, self.rnn_state0, self.rnn_state1)
+        prob, value, rnn_state = self._act(obs_t, self.rnn_state)
         action_t = list(map(
             lambda p: np.random.choice(range(len(self.actions)), p=p), prob))
         value_t = np.reshape(value, [-1])
@@ -108,14 +71,13 @@ class Agent:
             log_probs_t.append(np.log(prob + 1e-20)[i][action])
 
         self.t += 1
-        self.rnn_state0_t = self.rnn_state0
-        self.rnn_state1_t = self.rnn_state1
+        self.rnn_state_t = self.rnn_state
         self.obs_t = obs_t
         self.action_t = action_t
         self.value_t = value_t
         self.log_probs_t = log_probs_t
         self.done_t = done_t
-        self.rnn_state0, self.rnn_state1 = rnn_state
+        self.rnn_state = rnn_state
         return list(map(lambda a: self.actions[a], action_t))
 
     # this method is called after act
@@ -130,12 +92,12 @@ class Agent:
                 value=self.value_t[i],
                 log_prob=self.log_probs_t[i],
                 terminal=1.0 if done_tp1[i] else 0.0,
-                feature=[self.rnn_state0_t[i], self.rnn_state1_t[i]]
+                feature=self.rnn_state_t[i]
             )
 
         if update:
             # compute bootstrap value
-            _, value, _ = self._act(obs_tp1, self.rnn_state0, self.rnn_state1)
+            _, value, _ = self._act(obs_tp1, self.rnn_state)
             value_tp1 = np.reshape(value, [-1])
             for i, done in enumerate(done_tp1):
                 if done:
@@ -145,8 +107,7 @@ class Agent:
         # initialize lstm state
         for i, done in enumerate(done_tp1):
             if done:
-                self.rnn_state0[i] = self.initial_state[0]
-                self.rnn_state1[i] = self.initial_state[0]
+                self.rnn_state[i] = self.initial_state[0]
 
     def train(self, bootstrap_values):
         # rollout trajectories
@@ -156,8 +117,7 @@ class Agent:
         rewards = trajectories['rewards']
         values = trajectories['values']
         log_probs = trajectories['log_probs']
-        features0 = trajectories['features0']
-        features1 = trajectories['features1']
+        features = trajectories['features']
         terminals = trajectories['terminals']
         masks = trajectories['masks']
 
@@ -168,8 +128,7 @@ class Agent:
         advs = compute_gae(
             rewards, values, bootstrap_values, terminals, self.gamma, self.lam)
         # normalize advantages
-        valid_advs = np.reshape(advs, [-1])[np.reshape(masks == 1.0, [-1])]
-        advs = (advs - np.mean(valid_advs)) / np.std(valid_advs)
+        advs = (advs - np.mean(advs)) / np.std(advs)
 
         # train network
         for epoch in range(self.epoch):
@@ -180,13 +139,11 @@ class Agent:
                 batch_returns = self._pick_batch(returns, i)
                 batch_advs = self._pick_batch(advs, i)
                 batch_log_probs = self._pick_batch(log_probs, i)
-                batch_features0 = features0[:, index, :]
-                batch_features1 = features1[:, index, :]
-                batch_masks = self._pick_batch(masks, i) == 1.0
+                batch_features = features[:, index, :]
+                batch_masks = self._pick_batch(masks, i)
                 loss = self._train(
                     batch_states, batch_actions, batch_returns, batch_advs,
-                    batch_log_probs, batch_features0, batch_features1,
-                    batch_masks, self.batch_size)
+                    batch_log_probs, batch_features, batch_masks)
 
         # clean trajectories
         for rollout in self.rollouts:
@@ -199,8 +156,7 @@ class Agent:
         rewards = []
         values = []
         log_probs = []
-        features0 = []
-        features1 = []
+        features = []
         terminals = []
         masks = []
         for rollout in self.rollouts:
@@ -209,21 +165,18 @@ class Agent:
             rewards.append(rollout.rewards)
             values.append(rollout.values)
             log_probs.append(rollout.log_probs)
-            features0.append(np.array(rollout.features)[:,0,:])
-            features1.append(np.array(rollout.features)[:,1,:])
+            features.append(rollout.features)
             # create mask
             terminals.append(rollout.terminals)
-            dones = [0.0] + rollout.terminals[:len(rollout.terminals) - 1]
-            mask = (np.array(dones) - 1.0) * -1.0
-            masks.append(mask.tolist())
+            mask = [0.0] + rollout.terminals[:len(rollout.terminals) - 1]
+            masks.append(mask)
         trajectories = dict(
             states=np.array(states),
             actions=np.array(actions),
             rewards=np.array(rewards),
             values=np.array(values),
             log_probs=np.array(log_probs),
-            features0=np.array(features0),
-            features1=np.array(features1),
+            features=np.array(features),
             terminals=np.array(terminals),
             masks=np.array(masks)
         )

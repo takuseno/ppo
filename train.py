@@ -65,7 +65,7 @@ def main():
 
     model = make_network(
         constants.CONVS, constants.FCS,
-        lstm=constants.LSTM, padding=constants.PADDING)
+        use_lstm=constants.LSTM, padding=constants.PADDING)
 
     # learning rate with decay operation
     lr = tf.Variable(constants.LR)
