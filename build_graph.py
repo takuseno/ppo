@@ -63,8 +63,9 @@ def build_train(model,
             entropy *= entropy_factor
         with tf.variable_scope('policy_loss'):
             log_prob = train_dist.log_prob(actions_ph)
-            ratio = tf.reduce_mean(
-                tf.exp(log_prob - old_log_probs_ph), axis=1, keepdims=True)
+            ratio = tf.exp(log_prob - old_log_probs_ph)
+            if continuous:
+                ratio = tf.reduce_mean(ratio, axis=1, keep_dims=True)
             surr1 = ratio * advantages
             surr2 = tf.clip_by_value(
                 ratio, 1.0 - epsilon, 1.0 + epsilon) * advantages
