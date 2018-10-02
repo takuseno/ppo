@@ -52,9 +52,9 @@ def cnn_network(convs,
                 scope):
     out = make_cnn(convs, padding, inpt)
     out = layers.flatten(out)
-    out = make_fcs(fcs, inpt)
+    out = make_fcs(fcs, out)
     rnn_out, rnn_state = make_lstm(
-        lstm_unit, nenvs, step_size, inpt, masks, rnn_state)
+        lstm_unit, nenvs, step_size, out, masks, rnn_state)
 
     if use_lstm:
         out = rnn_out
