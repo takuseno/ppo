@@ -9,7 +9,7 @@ from rlsaber.util import compute_returns, compute_gae
 class Agent:
     def __init__(self,
                  model,
-                 actions,
+                 num_actions,
                  optimizer,
                  nenvs,
                  gamma=0.99,
@@ -24,8 +24,10 @@ class Agent:
                  grad_clip=40.0,
                  state_shape=[84, 84, 1],
                  phi=lambda s: s,
-                 name='a2c'):
-        self.actions = actions
+                 continuous=False,
+                 upper_bound=1.0,
+                 name='ppo'):
+        self.num_actions = num_actions
         self.gamma = gamma
         self.lam = lam
         self.lstm_unit = lstm_unit
@@ -36,10 +38,12 @@ class Agent:
         self.batch_size = batch_size
         self.epoch = epoch
         self.phi = phi 
+        self.continuous = continuous
+        self.upper_bound = upper_bound
 
         self._act, self._train = build_train(
             model=model,
-            num_actions=len(actions),
+            num_actions=num_actions,
             optimizer=optimizer,
             nenvs=nenvs,
             step_size=batch_size,
@@ -49,6 +53,7 @@ class Agent:
             value_factor=value_factor,
             entropy_factor=entropy_factor,
             epsilon=epsilon,
+            continuous=continuous,
             scope=name
         )
 
@@ -62,13 +67,8 @@ class Agent:
         # change state shape to WHC
         obs_t = list(map(self.phi, obs_t))
         # take next action
-        prob, value, rnn_state = self._act(obs_t, self.rnn_state)
-        action_t = list(map(
-            lambda p: np.random.choice(range(len(self.actions)), p=p), prob))
+        action_t, log_probs_t, value, rnn_state = self._act(obs_t, self.rnn_state)
         value_t = np.reshape(value, [-1])
-        log_probs_t = []
-        for i, action, in enumerate(action_t):
-            log_probs_t.append(np.log(prob + 1e-20)[i][action])
 
         self.t += 1
         self.rnn_state_t = self.rnn_state
@@ -78,7 +78,11 @@ class Agent:
         self.log_probs_t = log_probs_t
         self.done_t = done_t
         self.rnn_state = rnn_state
-        return list(map(lambda a: self.actions[a], action_t))
+
+        if self.continuous:
+            return action_t * self.upper_bound
+        else:
+            return action_t
 
     # this method is called after act
     def receive_next(self, obs_tp1, reward_tp1, done_tp1, update=False):
@@ -97,7 +101,7 @@ class Agent:
 
         if update:
             # compute bootstrap value
-            _, value, _ = self._act(obs_tp1, self.rnn_state)
+            _, _, value, _ = self._act(obs_tp1, self.rnn_state)
             value_tp1 = np.reshape(value, [-1])
             for i, done in enumerate(done_tp1):
                 if done:
@@ -135,10 +139,14 @@ class Agent:
             for i in range(int(self.time_horizon / self.batch_size)):
                 index = i * self.batch_size
                 batch_states = self._pick_batch(states, i, shape=self.state_shape)
-                batch_actions = self._pick_batch(actions, i)
+                if self.continuous:
+                    batch_actions = self._pick_batch(actions, i, shape=[self.num_actions])
+                    batch_log_probs = self._pick_batch(log_probs, i, shape=[self.num_actions])
+                else:
+                    batch_actions = self._pick_batch(actions, i)
+                    batch_log_probs = self._pick_batch(log_probs, i)
                 batch_returns = self._pick_batch(returns, i)
                 batch_advs = self._pick_batch(advs, i)
-                batch_log_probs = self._pick_batch(log_probs, i)
                 batch_features = features[:, index, :]
                 batch_masks = self._pick_batch(masks, i)
                 loss = self._train(
