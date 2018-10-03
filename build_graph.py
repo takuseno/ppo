@@ -1,114 +1,111 @@
+import numpy as np
 import tensorflow as tf
-import lightsaber.tensorflow.util as util
 
 
-def build_train(network, obs_dim,
-            num_actions, gamma=1.0, epsilon=0.2, beta=0.01, scope='ppo', reuse=None):
+def build_train(model,
+                num_actions,
+                optimizer,
+                nenvs,
+                step_size,
+                lstm_unit=256,
+                state_shape=[84, 84, 1],
+                grad_clip=40.0,
+                value_factor=0.5,
+                entropy_factor=0.01,
+                epsilon=0.2,
+                continuous=False,
+                scope='ppo',
+                reuse=None):
     with tf.variable_scope(scope, reuse=reuse):
-        # input placeholders
-        obs_t_input = tf.placeholder(tf.float32, [None, obs_dim], name='obs_t')
-        act_t_ph = tf.placeholder(tf.float32, [None, num_actions], name='action')
-        return_t_ph = tf.placeholder(tf.float32, [None, 1], name='return')
-        advantage_t_ph = tf.placeholder(tf.float32, [None, 1], name='advantage')
+        # placeholers
+        step_obs_input = tf.placeholder(
+            tf.float32, [nenvs] + state_shape, name='step_obs')
+        train_obs_input = tf.placeholder(
+            tf.float32, [nenvs*step_size] + state_shape, name='train_obs')
+        rnn_state_ph = tf.placeholder(
+            tf.float32, [nenvs, lstm_unit*2], name='rnn_state')
+        returns_ph = tf.placeholder(tf.float32, [None], name='returns')
+        advantages_ph = tf.placeholder(tf.float32, [None], name='advantage')
+        masks_ph = tf.placeholder(tf.float32, [nenvs * step_size], name='masks')
+        if continuous:
+            actions_ph = tf.placeholder(
+                tf.float32, [nenvs*step_size, num_actions], name='action')
+            old_log_probs_ph = tf.placeholder(
+                tf.float32, [nenvs*step_size, num_actions], name='old_log_prob')
+        else:
+            actions_ph = tf.placeholder(
+                tf.int32, [nenvs*step_size], name='action')
+            old_log_probs_ph = tf.placeholder(
+                tf.float32, [nenvs*step_size], name='old_log_prob')
 
-        policy, value, dist = network(
-            obs_t_input,
-            num_actions,
-            scope='network',
-            reuse=reuse
-        )
-        network_func_vars = util.scope_vars(
-            util.absolute_scope_name('network'),
-            trainable_only=True
-        )
+        # network outputs for inference
+        step_dist, step_value, state_out = model(
+            step_obs_input, tf.constant(0.0, shape=[nenvs, 1]), rnn_state_ph,
+            num_actions, lstm_unit, nenvs, 1, scope='model')
+        # network outputs for training
+        train_dist, train_value, _ = model(
+            train_obs_input, tf.reshape(masks_ph, [nenvs * step_size, 1]),
+            rnn_state_ph, num_actions, lstm_unit, nenvs, step_size,
+            scope='model')
 
-        old_policy, old_value, old_dist = network(
-            obs_t_input,
-            num_actions,
-            scope='old_network',
-            reuse=reuse
-        )
-        old_network_func_vars = util.scope_vars(
-            util.absolute_scope_name('old_network'),
-            trainable_only=True
-        )
+        # network weights
+        network_vars = tf.get_collection(
+            tf.GraphKeys.TRAINABLE_VARIABLES, scope)
 
-        tmp_policy, tmp_value, tmp_dist = network(
-            obs_t_input,
-            num_actions,
-            scope='tmp_network',
-            reuse=reuse
-        )
-        tmp_network_func_vars = util.scope_vars(
-            util.absolute_scope_name('tmp_network'),
-            trainable_only=True
-        )
+        # loss
+        advantages = tf.reshape(advantages_ph, [-1, 1])
+        returns = tf.reshape(returns_ph, [-1, 1])
+        with tf.variable_scope('value_loss'):
+            value_loss = tf.reduce_mean(tf.square(returns - train_value))
+            value_loss *= value_factor
+        with tf.variable_scope('entropy'):
+            entropy = tf.reduce_mean(train_dist.entropy())
+            entropy *= entropy_factor
+        with tf.variable_scope('policy_loss'):
+            log_prob = train_dist.log_prob(actions_ph)
+            ratio = tf.exp(log_prob - old_log_probs_ph)
+            if continuous:
+                ratio = tf.reduce_mean(ratio, axis=1, keep_dims=True)
+            else:
+                ratio = tf.reshape(ratio, [-1, 1])
+            surr1 = ratio * advantages
+            surr2 = tf.clip_by_value(
+                ratio, 1.0 - epsilon, 1.0 + epsilon) * advantages
+            surr = tf.minimum(surr1, surr2)
+            policy_loss = tf.reduce_mean(surr)
+        loss = value_loss - policy_loss - entropy
 
-        # clipped surrogate objective
-        cur_policy = dist.log_prob(act_t_ph + 1e-5)
-        old_policy = old_dist.log_prob(act_t_ph + 1e-5)
-        ratio = tf.exp(cur_policy - old_policy)
-        clipped_ratio = tf.clip_by_value(ratio, 1.0 - epsilon, 1.0 + epsilon)
-        surrogate = -tf.reduce_mean(
-            tf.minimum(ratio * advantage_t_ph, clipped_ratio * advantage_t_ph),
-            name='surrogate')
+        # gradients
+        gradients = tf.gradients(loss, network_vars)
+        clipped_gradients, _ = tf.clip_by_global_norm(gradients, grad_clip)
+        # update
+        grads_and_vars = zip(clipped_gradients, network_vars)
+        optimize_expr = optimizer.apply_gradients(grads_and_vars)
 
-        with tf.variable_scope('loss'):
-            # value network loss
-            value_loss = tf.reduce_mean(tf.square(value - return_t_ph))
+        # action
+        action = step_dist.sample(1)[0]
+        log_policy = step_dist.log_prob(action)
 
-            # entropy penalty for exploration
-            entropy = tf.reduce_mean(dist.entropy())
-            penalty = -beta * entropy
+        def train(obs, actions, returns, advantages, log_probs,  rnn_state, masks):
+            feed_dict = {
+                train_obs_input: obs,
+                actions_ph: actions,
+                returns_ph: returns,
+                advantages_ph: advantages,
+                old_log_probs_ph: log_probs,
+                rnn_state_ph: rnn_state,
+                masks_ph: masks
+            }
+            sess = tf.get_default_session()
+            return sess.run([loss, optimize_expr], feed_dict=feed_dict)[0]
 
-            # total loss
-            loss = surrogate + value_loss + penalty
+        def act(obs, rnn_state):
+            feed_dict = {
+                step_obs_input: obs,
+                rnn_state_ph: rnn_state,
+            }
+            sess = tf.get_default_session()
+            ops = [action, log_policy, step_value, state_out]
+            return sess.run(ops, feed_dict=feed_dict)
 
-        # optimize operations
-        optimizer = tf.train.AdamOptimizer(3 * 1e-4)
-        optimize_expr = optimizer.minimize(loss, var_list=network_func_vars)
-
-        # update old network operations
-        with tf.variable_scope('update_old_network'):
-            update_old_expr = []
-            sorted_tmp_vars = sorted(
-                tmp_network_func_vars,
-                key=lambda v: v.name
-            )
-            sorted_old_vars = sorted(
-                old_network_func_vars,
-                key=lambda v: v.name
-            )
-            for var_tmp, var_old in zip(sorted_tmp_vars, sorted_old_vars):
-                update_old_expr.append(var_old.assign(var_tmp))
-            update_old_expr = tf.group(*update_old_expr)
-
-        # update tmp network operations
-        with tf.variable_scope('update_tmp_network'):
-            update_tmp_expr = []
-            sorted_vars = sorted(network_func_vars, key=lambda v: v.name)
-            sorted_tmp_vars = sorted(
-                tmp_network_func_vars,
-                key=lambda v: v.name
-            )
-            for var, var_tmp in zip(sorted_vars, sorted_tmp_vars):
-                update_tmp_expr.append(var_tmp.assign(var))
-            update_tmp_expr = tf.group(*update_tmp_expr)
-
-        # action theano-style function
-        act = util.function(inputs=[obs_t_input], outputs=[policy, value])
-
-        # train theano-style function
-        train = util.function(
-            inputs=[
-                obs_t_input, act_t_ph, return_t_ph, advantage_t_ph
-            ],
-            outputs=[loss, value_loss, tf.reduce_mean(ratio)],
-            updates=[optimize_expr]
-        )
-
-        # update target theano-style function
-        update_old = util.function([], [], updates=[update_old_expr])
-        backup_current = util.function([], [], updates=[update_tmp_expr])
-
-        return act, train, update_old, backup_current
+    return act, train

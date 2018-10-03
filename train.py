@@ -1,148 +1,167 @@
+import threading
+import multiprocessing
 import argparse
 import cv2
 import gym
 import copy
 import os
-import sys
-import random
+import time
+import atari_constants
+import box_constants
 import numpy as np
 import tensorflow as tf
 
-from lightsaber.tensorflow.util import initialize
-from lightsaber.rl.replay_buffer import ReplayBuffer
+from rlsaber.log import TfBoardLogger, dump_constants
+from rlsaber.trainer import BatchTrainer
+from rlsaber.env import EnvWrapper, BatchEnvWrapper, NoopResetEnv, EpisodicLifeEnv, MaxAndSkipEnv
+from rlsaber.preprocess import atari_preprocess
 from network import make_network
 from agent import Agent
+from datetime import datetime
 
 
 def main():
+    date = datetime.now().strftime('%Y%m%d%H%M%S')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='Pendulum-v0')
-    parser.add_argument('--outdir', type=str, default=None)
-    parser.add_argument('--logdir', type=str, default=None)
-    parser.add_argument('--load', type=str, default=None)
-    parser.add_argument('--final-steps', type=int, default=10 ** 7)
+    parser.add_argument('--env', type=str, default='PongNoFrameskip-v4')
+    parser.add_argument('--load', type=str)
+    parser.add_argument('--logdir', type=str, default=date)
     parser.add_argument('--render', action='store_true')
-    parser.add_argument('--batch', type=int, default=64)
-    parser.add_argument('--epoch', type=int, default=10)
+    parser.add_argument('--demo', action='store_true')
     args = parser.parse_args()
 
-    if args.outdir is None:
-        args.outdir = os.path.join(os.path.dirname(__file__), 'results')
-        if not os.path.exists(args.outdir):
-            os.makedirs(args.outdir)
-    if args.logdir is None:
-        args.logdir = os.path.join(os.path.dirname(__file__), 'logs')
+    outdir = os.path.join(os.path.dirname(__file__), 'results/' + args.logdir)
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+    logdir = os.path.join(os.path.dirname(__file__), 'logs/' + args.logdir)
 
-    env = gym.make(args.env)
+    env_name = args.env
+    tmp_env = gym.make(env_name)
+    is_atari = len(tmp_env.observation_space.shape) != 1
+    if not is_atari:
+        observation_space = tmp_env.observation_space
+        constants = box_constants
+        if isinstance(tmp_env.action_space, gym.spaces.Box):
+            num_actions = tmp_env.action_space.shape[0]
+        else:
+            num_actions = tmp_env.action_space.n
+        state_shape = [observation_space.shape[0], constants.STATE_WINDOW]
+        state_preprocess = lambda s: s
+        reward_preprocess = lambda r: r / 10.0
+        # (window_size, dim) -> (dim, window_size)
+        phi = lambda s: np.transpose(s, [1, 0])
+    else:
+        constants = atari_constants
+        num_actions = tmp_env.action_space.n
+        state_shape = constants.STATE_SHAPE + [constants.STATE_WINDOW]
+        def state_preprocess(state):
+            state = atari_preprocess(state, constants.STATE_SHAPE)
+            state = np.array(state, dtype=np.float32)
+            return state / 255.0
+        reward_preprocess = lambda r: np.clip(r, -1.0, 1.0)
+        # (window_size, H, W) -> (H, W, window_size)
+        phi = lambda s: np.transpose(s, [1, 2, 0])
 
-    obs_dim = env.observation_space.shape[0]
-    n_actions = env.action_space.shape[0]
+    # flag of continuous action space
+    continuous = isinstance(tmp_env.action_space, gym.spaces.Box)
+    upper_bound = tmp_env.action_space.high if continuous else None
 
-    network = make_network([64, 64])
+    # save settings
+    dump_constants(constants, os.path.join(outdir, 'constants.json'))
 
     sess = tf.Session()
     sess.__enter__()
 
-    agent = Agent(network, obs_dim, n_actions)
+    model = make_network(
+        constants.CONVS, constants.FCS, use_lstm=constants.LSTM,
+        padding=constants.PADDING, continuous=continuous)
 
-    initialize()
-    agent.sync_old()
+    # learning rate with decay operation
+    lr = tf.Variable(constants.LR)
+    decayed_lr = tf.placeholder(tf.float32)
+    decay_lr_op = lr.assign(decayed_lr)
+    optimizer = tf.train.AdamOptimizer(lr, epsilon=1e-5)
+    # epsilon with decay operation
+    epsilon = tf.Variable(constants.EPSILON)
+    decayed_epsilon = tf.placeholder(tf.float32)
+    decay_epsilon_op = epsilon.assign(decayed_epsilon)
+
+    agent = Agent(
+        model,
+        num_actions,
+        optimizer,
+        nenvs=constants.ACTORS,
+        gamma=constants.GAMMA,
+        lam=constants.LAM,
+        lstm_unit=constants.LSTM_UNIT,
+        value_factor=constants.VALUE_FACTOR,
+        entropy_factor=constants.ENTROPY_FACTOR,
+        time_horizon=constants.TIME_HORIZON,
+        batch_size=constants.BATCH_SIZE,
+        grad_clip=constants.GRAD_CLIP,
+        epsilon=epsilon,
+        state_shape=state_shape,
+        epoch=constants.EPOCH,
+        phi=phi,
+        use_lstm=constants.LSTM,
+        continuous=continuous,
+        upper_bound=upper_bound
+    )
 
     saver = tf.train.Saver()
-    if args.load is not None:
+    if args.load:
         saver.restore(sess, args.load)
 
-    reward_summary = tf.placeholder(tf.int32, (), name='reward_summary')
-    tf.summary.scalar('reward_summary', reward_summary)
-    merged = tf.summary.merge_all()
-    train_writer = tf.summary.FileWriter(args.logdir, sess.graph)
+    # create environemtns
+    envs = []
+    for i in range(constants.ACTORS):
+        env = gym.make(args.env)
+        env.seed(constants.RANDOM_SEED)
+        if is_atari:
+            env = NoopResetEnv(env, noop_max=30)
+            env = MaxAndSkipEnv(env)
+            env = EpisodicLifeEnv(env)
+        wrapped_env = EnvWrapper(
+            env,
+            r_preprocess=reward_preprocess,
+            s_preprocess=state_preprocess
+        ) 
+        envs.append(wrapped_env)
+    batch_env = BatchEnvWrapper(envs)
 
-    global_step = 0
-    episode = 0
-    while True:
-        local_step = 0
+    sess.run(tf.global_variables_initializer())
 
-        while True:
-            training_data = []
-            sum_of_reward = 0
-            reward = 0
-            obs = env.reset()
-            last_obs = None
-            last_action = None
-            last_value = None
-            done = False
+    summary_writer = tf.summary.FileWriter(logdir, sess.graph)
+    logger = TfBoardLogger(summary_writer)
+    logger.register('reward', dtype=tf.float32)
+    end_episode = lambda r, s, e: logger.plot('reward', r, s)
 
-            while not done:
-                if args.render:
-                    env.render()
+    def after_action(state, reward, global_step, local_step):
+        if constants.LR_DECAY == 'linear':
+            decay = 1.0 - (float(global_step) / constants.FINAL_STEP)
+            if decay < 0.0:
+                decay = 0.0
+            sess.run(decay_lr_op, feed_dict={decayed_lr: constants.LR * decay})
+            sess.run(decay_epsilon_op,
+                     feed_dict={decayed_epsilon: constants.EPSILON * decay})
+        if global_step % 10 ** 6 == 0:
+            path = os.path.join(outdir, 'model.ckpt')
+            saver.save(sess, path, global_step=global_step)
 
-                action, value = agent.act_and_train(
-                        last_obs, last_action, last_value, reward,  obs)
-
-                last_obs = obs
-                last_action = action
-                last_value = value
-                obs, reward, done, info = env.step(action)
-
-                sum_of_reward += reward
-                global_step += 1
-                local_step += 1
-
-                # save model
-                if global_step % 10 ** 6 == 0:
-                    path = os.path.join(args.outdir,
-                            '{}/model.ckpt'.format(global_step))
-                    saver.save(sess, path)
-
-                # the end of episode
-                if done:
-                    summary, _ = sess.run(
-                        [merged, reward_summary],
-                        feed_dict={reward_summary: sum_of_reward}
-                    )
-                    train_writer.add_summary(summary, global_step)
-                    agent.stop_episode(
-                            last_obs, last_action, last_value, reward)
-                    print(
-                        'Episode: {}, Step: {}: Reward: {}'.format(
-                        episode,
-                        global_step,
-                        sum_of_reward
-                    ))
-                    episode += 1
-                    break
-
-            # append data for training
-            training_data.append(agent.get_training_data())
-
-            if local_step > 2048:
-                break
-
-        # train network
-        obs = []
-        actions = []
-        returns = []
-        deltas = []
-        for o, a, r, d in training_data:
-            obs.extend(o)
-            actions.extend(a)
-            returns.extend(r)
-            deltas.extend(d)
-        for epoch in range(args.epoch):
-            indices = random.sample(range(len(obs)), args.batch)
-            sampled_obs = np.array(obs)[indices]
-            sampled_actions = np.array(actions)[indices]
-            sampled_returns = np.array(returns)[indices]
-            sampled_deltas = np.array(deltas)[indices]
-            ratio = agent.train(
-                sampled_obs,
-                sampled_actions,
-                sampled_returns,
-                sampled_deltas
-            )
-
-        if args.final_steps < global_step:
-            break
+    trainer = BatchTrainer(
+        env=batch_env,
+        agent=agent,
+        render=args.render,
+        state_shape=state_shape[:-1],
+        state_window=constants.STATE_WINDOW,
+        time_horizon=constants.TIME_HORIZON,
+        batch_size=constants.BATCH_SIZE,
+        final_step=constants.FINAL_STEP,
+        after_action=after_action,
+        end_episode=end_episode,
+        training=not args.demo
+    )
+    trainer.start()
 
 if __name__ == '__main__':
     main()
