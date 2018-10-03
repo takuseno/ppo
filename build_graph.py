@@ -4,7 +4,8 @@ import tensorflow as tf
 
 def build_train(model,
                 num_actions,
-                optimizer,
+                lr,
+                epsilon,
                 nenvs,
                 step_size,
                 lstm_unit=256,
@@ -12,7 +13,6 @@ def build_train(model,
                 grad_clip=40.0,
                 value_factor=0.5,
                 entropy_factor=0.01,
-                epsilon=0.2,
                 continuous=False,
                 scope='ppo',
                 reuse=None):
@@ -80,6 +80,7 @@ def build_train(model,
         clipped_gradients, _ = tf.clip_by_global_norm(gradients, grad_clip)
         # update
         grads_and_vars = zip(clipped_gradients, network_vars)
+        optimizer = tf.train.AdamOptimizer(lr, epsilon=1e-5)
         optimize_expr = optimizer.apply_gradients(grads_and_vars)
 
         # action

@@ -17,6 +17,7 @@ from rlsaber.env import EnvWrapper, BatchEnvWrapper, NoopResetEnv, EpisodicLifeE
 from rlsaber.preprocess import atari_preprocess
 from network import make_network
 from agent import Agent
+from scheduler import LinearScheduler, ConstantScheduler
 from datetime import datetime
 
 
@@ -80,17 +81,20 @@ def main():
     lr = tf.Variable(constants.LR)
     decayed_lr = tf.placeholder(tf.float32)
     decay_lr_op = lr.assign(decayed_lr)
-    optimizer = tf.train.AdamOptimizer(lr, epsilon=1e-5)
-    # epsilon with decay operation
-    epsilon = tf.Variable(constants.EPSILON)
-    decayed_epsilon = tf.placeholder(tf.float32)
-    decay_epsilon_op = epsilon.assign(decayed_epsilon)
+    if constants.LR_DECAY == 'linear':
+        lr = LinearScheduler(constants.LR, constants.FINAL_STEP, 'lr')
+        epsilon = LinearScheduler(
+            constants.EPSILON, constants.FINAL_STEP, 'epsilon')
+    else:
+        lr = ConstantScheduler(constants.LR, 'lr')
+        epsilon = ConstantScheduler(constants.EPSILON, 'epsilon')
 
     agent = Agent(
         model,
         num_actions,
-        optimizer,
         nenvs=constants.ACTORS,
+        lr=lr,
+        epsilon=epsilon,
         gamma=constants.GAMMA,
         lam=constants.LAM,
         lstm_unit=constants.LSTM_UNIT,
@@ -99,7 +103,6 @@ def main():
         time_horizon=constants.TIME_HORIZON,
         batch_size=constants.BATCH_SIZE,
         grad_clip=constants.GRAD_CLIP,
-        epsilon=epsilon,
         state_shape=state_shape,
         epoch=constants.EPOCH,
         phi=phi,
@@ -137,13 +140,6 @@ def main():
     end_episode = lambda r, s, e: logger.plot('reward', r, s)
 
     def after_action(state, reward, global_step, local_step):
-        if constants.LR_DECAY == 'linear':
-            decay = 1.0 - (float(global_step) / constants.FINAL_STEP)
-            if decay < 0.0:
-                decay = 0.0
-            sess.run(decay_lr_op, feed_dict={decayed_lr: constants.LR * decay})
-            sess.run(decay_epsilon_op,
-                     feed_dict={decayed_epsilon: constants.EPSILON * decay})
         if global_step % 10 ** 6 == 0:
             path = os.path.join(outdir, 'model.ckpt')
             saver.save(sess, path, global_step=global_step)

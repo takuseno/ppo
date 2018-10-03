@@ -10,14 +10,14 @@ class Agent:
     def __init__(self,
                  model,
                  num_actions,
-                 optimizer,
                  nenvs,
+                 lr,
+                 epsilon,
                  gamma=0.99,
                  lam=0.95,
                  lstm_unit=256,
                  value_factor=0.5,
                  entropy_factor=0.01,
-                 epsilon=0.1,
                  time_horizon=128,
                  batch_size=32,
                  epoch=3,
@@ -35,6 +35,8 @@ class Agent:
         self.name = name
         self.state_shape = state_shape
         self.nenvs = nenvs
+        self.lr = lr
+        self.epsilon = epsilon
         self.time_horizon = time_horizon
         self.batch_size = batch_size
         self.epoch = epoch
@@ -46,7 +48,8 @@ class Agent:
         self._act, self._train = build_train(
             model=model,
             num_actions=num_actions,
-            optimizer=optimizer,
+            lr=lr.get_variable(),
+            epsilon=epsilon.get_variable(),
             nenvs=nenvs,
             step_size=batch_size,
             lstm_unit=lstm_unit,
@@ -54,7 +57,6 @@ class Agent:
             grad_clip=grad_clip,
             value_factor=value_factor,
             entropy_factor=entropy_factor,
-            epsilon=epsilon,
             continuous=continuous,
             scope=name
         )
@@ -72,7 +74,7 @@ class Agent:
         action_t, log_probs_t, value, rnn_state = self._act(obs_t, self.rnn_state)
         value_t = np.reshape(value, [-1])
 
-        self.t += 1
+        self.t += self.nenvs
         self.rnn_state_t = self.rnn_state
         self.obs_t = obs_t
         self.action_t = action_t
@@ -80,6 +82,10 @@ class Agent:
         self.log_probs_t = log_probs_t
         self.done_t = done_t
         self.rnn_state = rnn_state
+
+        # decay parameters
+        self.lr.decay(self.t)
+        self.epsilon.decay(self.t)
 
         if self.continuous:
             return action_t * self.upper_bound
