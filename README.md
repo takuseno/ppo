@@ -45,7 +45,7 @@ $ python train.py --demo --load results/breakout/model.ckpt-xxxx --env BreakoutN
 ![image](https://user-images.githubusercontent.com/5235131/46388030-e4f72980-c704-11e8-9d76-1790dcb88067.png)
 
 #### BreakoutNoFrameskip-v4
-coming soon
+![image](https://user-images.githubusercontent.com/5235131/46402330-6321f300-c73a-11e8-9b46-46959bce4c3d.png)
 
 
 ### implementation
