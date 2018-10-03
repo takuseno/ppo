@@ -103,6 +103,7 @@ def main():
         state_shape=state_shape,
         epoch=constants.EPOCH,
         phi=phi,
+        use_lstm=constants.LSTM,
         continuous=continuous,
         upper_bound=upper_bound
     )
