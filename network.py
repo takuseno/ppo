@@ -5,7 +5,9 @@ import tensorflow.contrib.layers as layers
 from rlsaber.tf_util import lstm, batch_to_seq, seq_to_batch
 
 
-def make_cnn(convs, padding, inpt):
+def make_cnn(convs, padding, inpt, initializer=None):
+    if initializer is None:
+        initializer = tf.orthogonal_initializer(np.sqrt(2.0))
     out = inpt
     with tf.variable_scope('convnet'):
         for num_outputs, kernel_size, stride in convs:
@@ -16,17 +18,18 @@ def make_cnn(convs, padding, inpt):
                 stride=stride,
                 padding=padding,
                 activation_fn=tf.nn.relu,
-                weights_initializer=tf.orthogonal_initializer(np.sqrt(2.0))
+                weights_initializer=initializer
             )
     return out
 
-def make_fcs(fcs, inpt, activation=tf.nn.relu):
+def make_fcs(fcs, inpt, activation=tf.nn.relu, initializer=None):
+    if initializer is None:
+        initializer = tf.orthogonal_initializer(np.sqrt(2.0))
     out = inpt
     with tf.variable_scope('hiddens'):
         for hidden in fcs:
-            out = layers.fully_connected(
-                out, hidden, activation_fn=activation,
-                weights_initializer=tf.orthogonal_initializer(np.sqrt(2.0)))
+            out = layers.fully_connected(out, hidden, activation_fn=activation,
+                                         weights_initializer=initializer)
     return out
 
 def make_lstm(lstm_unit, nenvs, step_size, inpt, masks, rnn_state):
@@ -81,26 +84,31 @@ def mlp_network(fcs,
                 step_size,
                 scope):
     policy_rnn_state, value_rnn_state = tf.split(rnn_state, 2, axis=-1)
+
     inpt = layers.flatten(inpt)
+    input_dim = inpt.get_shape().as_list()[1] + 1
+    def initializer(scale):
+        return tf.random_normal_initializer(stddev=np.sqrt(scale / input_dim))
+
     with tf.variable_scope('policy'):
-        out = make_fcs(fcs, inpt, activation=tf.nn.tanh)
+        out = make_fcs(
+            fcs, inpt, activation=tf.nn.tanh, initializer=initializer(1.0))
         rnn_out, policy_rnn_state = make_lstm(
             lstm_unit//2, nenvs, step_size, out, masks, policy_rnn_state)
 
         if use_lstm:
             out = rnn_out
 
-        policy = layers.fully_connected(
-            out, num_actions, activation_fn=None,
-            weights_initializer=tf.orthogonal_initializer(0.1))
+        policy = layers.fully_connected(out, num_actions, activation_fn=None,
+                                        weights_initializer=initializer(0.01))
         logstd = tf.get_variable(name='logstd', shape=[1, num_actions],
                                  initializer=tf.zeros_initializer())
-        logstd = tf.tile(logstd, [nenvs * step_size, 1])
-        std = tf.exp(logstd)
+        std = tf.zeros_like(policy) + tf.exp(logstd)
         dist = tf.distributions.Normal(loc=policy, scale=std)
 
     with tf.variable_scope('value'):
-        out = make_fcs(fcs, inpt, activation=tf.nn.tanh)
+        out = make_fcs(
+            fcs, inpt, activation=tf.nn.tanh, initializer=initializer(1.0))
         rnn_out, value_rnn_state = make_lstm(
             lstm_unit//2, nenvs, step_size, out, masks, value_rnn_state)
 
@@ -108,8 +116,7 @@ def mlp_network(fcs,
             out = rnn_out
 
         value = layers.fully_connected(
-            out, 1, activation_fn=None,
-            weights_initializer=tf.orthogonal_initializer(1.0))
+            out, 1, activation_fn=None, weights_initializer=initializer(1.0))
 
     rnn_state = tf.concat([policy_rnn_state, value_rnn_state], axis=-1)
 
