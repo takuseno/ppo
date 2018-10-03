@@ -40,6 +40,14 @@ example
 $ python train.py --demo --load results/breakout/model.ckpt-xxxx --env BreakoutNoFrameskip-v4 --render
 ```
 
+### performance examples
+#### Pendulumn-v0
+![image](https://user-images.githubusercontent.com/5235131/46388030-e4f72980-c704-11e8-9d76-1790dcb88067.png)
+
+#### BreakoutNoFrameskip-v4
+coming soon
+
+
 ### implementation
 This is inspired by following projects.
 
