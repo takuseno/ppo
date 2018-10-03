@@ -24,6 +24,7 @@ class Agent:
                  grad_clip=40.0,
                  state_shape=[84, 84, 1],
                  phi=lambda s: s,
+                 use_lstm=False,
                  continuous=False,
                  upper_bound=1.0,
                  name='ppo'):
@@ -38,6 +39,7 @@ class Agent:
         self.batch_size = batch_size
         self.epoch = epoch
         self.phi = phi 
+        self.use_lstm = use_lstm
         self.continuous = continuous
         self.upper_bound = upper_bound
 
@@ -134,17 +136,30 @@ class Agent:
         # normalize advantages
         advs = (advs - np.mean(advs)) / np.std(advs)
 
+        # shuffle batch data if without lstm
+        if not self.use_lstm:
+            indices = np.random.permutation(range(self.time_horizon))
+            states = np.array(states)[:, indices]
+            actions = np.array(actions)[:, indices]
+            log_probs = np.array(log_probs)[:, indices]
+            returns = np.array(returns)[:, indices]
+            advs = np.array(advs)[:, indices]
+            masks = np.array(masks)[:, indices]
+
         # train network
         for epoch in range(self.epoch):
             for i in range(int(self.time_horizon / self.batch_size)):
                 index = i * self.batch_size
-                batch_states = self._pick_batch(states, i, shape=self.state_shape)
                 if self.continuous:
-                    batch_actions = self._pick_batch(actions, i, shape=[self.num_actions])
-                    batch_log_probs = self._pick_batch(log_probs, i, shape=[self.num_actions])
+                    batch_actions = self._pick_batch(
+                        actions, i, shape=[self.num_actions])
+                    batch_log_probs = self._pick_batch(
+                        log_probs, i, shape=[self.num_actions])
                 else:
                     batch_actions = self._pick_batch(actions, i)
                     batch_log_probs = self._pick_batch(log_probs, i)
+                batch_states = self._pick_batch(
+                    states, i, shape=self.state_shape)
                 batch_returns = self._pick_batch(returns, i)
                 batch_advs = self._pick_batch(advs, i)
                 batch_features = features[:, index, :]
