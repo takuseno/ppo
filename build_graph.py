@@ -66,6 +66,8 @@ def build_train(model,
             ratio = tf.exp(log_prob - old_log_probs_ph)
             if continuous:
                 ratio = tf.reduce_mean(ratio, axis=1, keep_dims=True)
+            else:
+                ratio = tf.reshape(ratio, [-1, 1])
             surr1 = ratio * advantages
             surr2 = tf.clip_by_value(
                 ratio, 1.0 - epsilon, 1.0 + epsilon) * advantages
