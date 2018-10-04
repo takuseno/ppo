@@ -78,9 +78,6 @@ def main():
         padding=constants.PADDING, continuous=continuous)
 
     # learning rate with decay operation
-    lr = tf.Variable(constants.LR)
-    decayed_lr = tf.placeholder(tf.float32)
-    decay_lr_op = lr.assign(decayed_lr)
     if constants.LR_DECAY == 'linear':
         lr = LinearScheduler(constants.LR, constants.FINAL_STEP, 'lr')
         epsilon = LinearScheduler(
