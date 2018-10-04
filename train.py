@@ -147,8 +147,6 @@ def main():
         render=args.render,
         state_shape=state_shape[:-1],
         state_window=constants.STATE_WINDOW,
-        time_horizon=constants.TIME_HORIZON,
-        batch_size=constants.BATCH_SIZE,
         final_step=constants.FINAL_STEP,
         after_action=after_action,
         end_episode=end_episode,
