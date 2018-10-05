@@ -99,9 +99,6 @@ class Agent:
 
         if self.t > 0 and (self.t / self.nenvs) % self.time_horizon == 0:
             bootstrap_values = value_t.copy()
-            for i, done in enumerate(done_t):
-                if done:
-                    bootstrap_values[i] = 0.0
             self.train(bootstrap_values)
 
         # decay parameters
