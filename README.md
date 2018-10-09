@@ -53,3 +53,6 @@ This is inspired by following projects.
 
 - [DQN](https://github.com/imai-laboratory/dqn)
 - [OpenAI Baselines](https://github.com/openai/baselines)
+
+## License
+This repository is MIT-licensed.
